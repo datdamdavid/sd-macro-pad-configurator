@@ -1,0 +1,2 @@
+# Allow logged-in user access to SDINNOVATION SIDE-KEYBOARD macro pad config interface
+KERNEL=="hidraw*", ATTRS{idVendor}=="6d7f", ATTRS{idProduct}=="dcfe", TAG+="uaccess", MODE="0660", GROUP="plugdev"

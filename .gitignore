@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.spec
+.vscode/
+.idea/
+backups/
+macro_names.json
+EOF
