@@ -343,8 +343,8 @@ class App(tk.Tk):
             for p in range(nprofiles):
                 self._switch_to_profile(p, update_ui=False)
                 table = self.pad.read_table()
-                lines.append(f"# --- Profile {p + 1} ---")
-                lines.append(f"python3 {sdpad_path} profile {p + 1}")
+                profile_num = p + 1
+                lines.append(f"# --- Profile {profile_num} ---")
                 for i, e in enumerate(table):
                     act = sdpad.action_to_cli(tuple(e))
                     # comment with human label
@@ -352,7 +352,7 @@ class App(tk.Tk):
                         desc = gui_describe(tuple(e))
                     except Exception:
                         desc = ""
-                    lines.append(f"python3 {sdpad_path} set {i} {act}  # {key_slot_label(i, self.layout)}: {desc}")
+                    lines.append(f"python3 {sdpad_path} set {i} {act} --profile {profile_num}  # {key_slot_label(i, self.layout)}: {desc}")
                 lines.append("")
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
