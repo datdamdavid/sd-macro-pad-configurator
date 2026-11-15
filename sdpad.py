@@ -27,6 +27,7 @@ SUPPORTED_VIDS = {vid for vid, _ in SUPPORTED_DEVICES}
 
 # ---------------------------------------------------------------- device
 def _match_requested(vid, pid, req_vid=None, req_pid=None):
+    """Return True if a USB VID/PID matches the user-requested filter (if provided)."""
     if req_vid is not None and vid != req_vid:
         return False
     if req_pid is not None and pid != req_pid:
@@ -35,7 +36,9 @@ def _match_requested(vid, pid, req_vid=None, req_pid=None):
 
 
 def _open_hid_device(req_vid=None, req_pid=None):
-    """Try to open device using hidapi (works on Windows, macOS, and Linux with hidapi)."""
+    """Try to open the vendor config HID interface via hidapi.
+    Prefers interface 2 / usage page 0xFF00 and supports optional VID/PID overrides.
+    """
     try:
         import hid
         if req_vid is not None:
@@ -66,7 +69,9 @@ def _open_hid_device(req_vid=None, req_pid=None):
     return None, None
 
 def find_config_hidraw(req_vid=None, req_pid=None):
-    """Return /dev/hidrawN of the 64-byte vendor interface (Linux native fallback)."""
+    """Return /dev/hidrawN of the vendor config interface (Linux native fallback).
+    Matches supported/requested VID:PID devices and selects interface number 2.
+    """
     if not sys.platform.startswith("linux"):
         return None
     for d in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
@@ -113,9 +118,11 @@ class Pad:
             self.path = "HIDAPI Device"
 
     def request(self, *payload, timeout=1.5):
+        # Protocol frame: 0x06 prefix + command payload, padded to 64 bytes.
         frame = bytes([0x06, *payload])
         frame += bytes(64 - len(frame))
 
+        # Key-table reads (cmd 0x08) are answered with 0x07 in this protocol family.
         want = 0x07 if payload[0] == 0x08 else payload[0]
 
         if self.mode == "hidapi":
@@ -263,6 +270,9 @@ CONS_REV = {v: k for k, v in CONSUMER.items()}
 
 
 def parse_action(s):
+    """Parse a CLI/GUI action string into a 4-byte key entry tuple (type,c1,c2,c3).
+    Supports named actions, mouse/media/macro forms, raw hex, and key combos.
+    """
     s = s.strip().lower()
     if s in ("none", "disabled"):
         return (0x13, 0, 0, 0)
@@ -364,6 +374,7 @@ def parse_action(s):
 
 
 def describe(e):
+    """Describe a 4-byte key entry as a human/CLI-friendly string."""
     t, a, b, c = e
     if t == 0x20:
         names = [n for n, v in (("ctrl", 1), ("shift", 2), ("alt", 4), ("gui", 8)) if a & v]
@@ -408,7 +419,8 @@ def describe(e):
     if t == 0x40 and a == 0x04:
         return "wakeup"
     if t == 0x11:
-        # b0: 0x08=up flag, 0x80=left flag; b1=X (right/left amount), b2=Y (up/down amount)
+        # Mouse-move encoding (device-specific): b0 flags direction (0x08 up, 0x80 left),
+        # b1 = horizontal amount, b2 = vertical amount (positive steps).
         parts = []
         if a & 0x08 and c:
             parts.append(f"up:{c}")

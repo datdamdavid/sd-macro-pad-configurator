@@ -376,7 +376,9 @@ class App(tk.Tk):
         self.guard(go)
 
     def _switch_to_profile(self, target, update_ui=False):
+        """Select a device profile and wait for it to become active, then refresh table/UI if requested."""
         self.pad.select_profile(target)
+        # Some devices apply profile changes asynchronously; poll until active matches.
         deadline = time.time() + 2.0
         info = self.pad.info()
         while time.time() < deadline and info.get("active") != target:
@@ -402,6 +404,7 @@ class App(tk.Tk):
             return
 
         def go():
+            # Export each device profile as explicit `sdpad.py set ... --profile N` commands.
             info = self.pad.info()
             nprofiles = info.get("profiles", 1)
             orig = info.get("active", self.profile_var.get() - 1)
@@ -419,7 +422,7 @@ class App(tk.Tk):
                 lines.append(f"# --- Profile {profile_num} ---")
                 for i, e in enumerate(table):
                     act = sdpad.action_to_cli(tuple(e))
-                    # comment with human label
+                    # Comment includes human label/slot for readability.
                     try:
                         desc = gui_describe(tuple(e))
                     except Exception:
@@ -428,7 +431,7 @@ class App(tk.Tk):
                 lines.append("")
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
-            # restore original
+            # Restore original profile and UI state.
             self._switch_to_profile(orig, update_ui=True)
             self.profile_var.set(orig + 1)
             self.status.set(f"Backup saved: {out_path}")
