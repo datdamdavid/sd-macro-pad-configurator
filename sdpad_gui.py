@@ -17,12 +17,75 @@ from sdpad import (Pad, KEYS, KEYS_REV, CONSUMER, CONS_REV, MODS, parse_action,
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
 
-# Device-specific physical layouts (key slots 0..N-1, row-major from top-left; dials start at 16)
+# Device-specific physical layouts (key slots 0..N-1, dials start at 16).
+# Most devices use row-major key slots; some (e.g. 0816:2473) use a different physical mapping.
 DEVICE_LAYOUTS = {
     0xDCFE: dict(key_count=9,  cols=3, rows=3, dial_count=2, name="SD-9 PRO"),
     0x2473: dict(key_count=12, cols=3, rows=4, dial_count=2, name="SIDE-KEYBOARD"),
 }
 DEFAULT_LAYOUT = dict(key_count=9, cols=3, rows=3, dial_count=2, name="MACRO PAD")
+
+# Known key+knob combinations -> grid layout (cols, rows, dial_count).
+# User-reported/common variants: 5x2+2, 3x4+2, 5x3+2, 4x4+2, 4x1+1, 3x2+1, 3x3+2 (keys as cols x rows).
+KNOWN_LAYOUTS = {
+    (3, 1): (3, 1),
+    (6, 1): (3, 2),
+    (9, 2): (3, 3),
+    (12, 2): (3, 4),
+    (4, 1): (4, 1),
+    (16, 2): (4, 4),
+    (10, 2): (5, 2),
+    (15, 2): (5, 3),
+}
+
+
+def infer_counts_from_table(table):
+    """Infer active key/dial counts from a 28-slot table (heuristic: non-disabled entries)."""
+    def is_disabled(e):
+        return tuple(e) == (0x13, 0, 0, 0)
+
+    keys = list(table[:16]) if len(table) >= 16 else list(table) + [(0x13, 0, 0, 0)] * (16 - len(table))
+    active_key_indices = [i for i, e in enumerate(keys) if not is_disabled(e)]
+    if active_key_indices:
+        # Contiguous prefix is the common case; use highest active slot + 1.
+        key_count = max(active_key_indices) + 1
+    else:
+        key_count = 0
+
+    dials = list(table[16:28]) if len(table) >= 28 else list(table[16:]) + [(0x13, 0, 0, 0)] * (28 - max(len(table), 16))
+    groups = [dials[i:i + 3] for i in range(0, 12, 3)]
+    dial_count = sum(1 for g in groups if any(not is_disabled(e) for e in g))
+    return key_count, dial_count
+
+
+def pick_layout(info, table):
+    """Choose GUI layout from device info/PID and inferred table counts."""
+    pid = info.get("pid") if isinstance(info, dict) else None
+    # PID-specific overrides take precedence (may include special slot mappings/names).
+    if pid in DEVICE_LAYOUTS:
+        layout = dict(DEVICE_LAYOUTS[pid])
+        # If table suggests a different count for the same device family, prefer detected counts when plausible.
+        key_count, dial_count = infer_counts_from_table(table)
+        if key_count:
+            layout["key_count"] = key_count
+        if dial_count:
+            layout["dial_count"] = dial_count
+        return layout
+
+    key_count, dial_count = infer_counts_from_table(table)
+    if (key_count, dial_count) in KNOWN_LAYOUTS:
+        cols, rows = KNOWN_LAYOUTS[(key_count, dial_count)]
+        return dict(key_count=key_count, cols=cols, rows=rows, dial_count=dial_count, name="MACRO PAD")
+    # Fallback: keep detected counts but guess a reasonable grid.
+    if key_count > 0:
+        if key_count <= 4:
+            cols, rows = key_count, 1
+        elif key_count <= 8:
+            cols, rows = 4, (key_count + 3) // 4
+        else:
+            cols, rows = 4, (key_count + 3) // 4
+        return dict(key_count=key_count, cols=cols, rows=max(1, rows), dial_count=max(0, dial_count), name="MACRO PAD")
+    return dict(DEFAULT_LAYOUT)
 
 # ---- theme (dark + neon green accent, gaming-peripheral style)
 BG       = "#0b0b0d"
@@ -284,12 +347,17 @@ class App(tk.Tk):
             self.pad = Pad()
             info = self.pad.info()
             self.profile_var.set(info["active"] + 1)
-            layout = DEVICE_LAYOUTS.get(info.get("pid"), DEFAULT_LAYOUT)
+            # Read table first so layout can be inferred from active key/dial slots.
+            table = self.pad.read_table()
+            layout = pick_layout(info, table)
             self.apply_layout(layout)
             self.status.set(f"Connected: {self.pad.path}   PID {info['pid']:04X}   "
                             f"firmware {info['firmware']}   profiles {info['profiles']}   "
                             f"layout {self.key_count} keys ({self.cols}x{self.rows}), {self.dial_count} dials")
-            self.refresh_all()
+            self.table = table
+            self.refresh_keys()
+            self.load_macros()
+            self.load_light()
         self.guard(go)
 
     def refresh_all(self):
