@@ -1,4 +1,4 @@
-"""pad_canvas.py - High-fidelity realistic graphic rendering of the 9-key + 2-dial macro pad.
+"""pad_canvas.py - High-fidelity realistic graphic rendering of SD macro pads.
 
 Provides interactive visualization:
 - Chamfered/rounded chassis with textured bezels
@@ -30,8 +30,8 @@ def round_polygon(canvas, x1, y1, x2, y2, radius=12, **kwargs):
     return canvas.create_polygon(points, smooth=True, **kwargs)
 
 class PadCanvas(tk.Frame):
-    """Custom graphical representation of the 9-key, 2-dial hardware pad."""
-    def __init__(self, parent, on_select_slot=None, **kwargs):
+    """Custom graphical representation of a macro pad (configurable key matrix + dials)."""
+    def __init__(self, parent, on_select_slot=None, layout=None, **kwargs):
         super().__init__(parent, bg="#0b0b0d", **kwargs)
         self.on_select_slot = on_select_slot
         self.selected_slot = None
@@ -39,6 +39,11 @@ class PadCanvas(tk.Frame):
         self.table = []
         self.key_colors = {}   # slot -> hex color "#rrggbb"
         self.rgb_mode = "palette" # "palette" or "perkey"
+        self.layout = dict(layout or dict(key_count=9, cols=3, rows=3, dial_count=2, name="SD-9 PRO"))
+        self.cols = self.layout.get("cols", 3)
+        self.rows = self.layout.get("rows", 3)
+        self.key_count = self.layout.get("key_count", self.cols * self.rows)
+        self.dial_count = self.layout.get("dial_count", 2)
 
         self.canvas = tk.Canvas(self, width=460, height=480, bg="#0b0b0d", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -47,12 +52,16 @@ class PadCanvas(tk.Frame):
         self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.bind("<Button-1>", self._on_click)
 
-        # Geometry definition
-        # Pad layout:
-        # Top-left to bottom-right: 3x3 key matrix
-        # Right side or top: 2 large rotary encoder dials with press center & side wings for CCW/CW
         self.hitboxes = {} # slot -> (type, (x1, y1, x2, y2) or center/radius)
 
+        self.draw()
+
+    def set_layout(self, layout):
+        self.layout = dict(layout)
+        self.cols = self.layout.get("cols", 3)
+        self.rows = self.layout.get("rows", 3)
+        self.key_count = self.layout.get("key_count", self.cols * self.rows)
+        self.dial_count = self.layout.get("dial_count", 2)
         self.draw()
 
     def set_data(self, table, selected_slot=None, key_colors=None, rgb_mode=None):
@@ -68,55 +77,76 @@ class PadCanvas(tk.Frame):
         self.selected_slot = slot
         self.draw()
 
+    def _slot_to_visual(self, slot):
+        """Return (visual_row, col) for a key slot, or None."""
+        if slot >= self.key_count:
+            return None
+        # 0816:2473: protocol slots are column-wise, bottom-to-top, left-to-right
+        # left: 0,1,2,3 (bottom->top), middle: 4,5,6,7, right: 8,9,10,11
+        if self.layout.get("name") == "SIDE-KEYBOARD" and self.cols == 3 and self.rows == 4:
+            col = slot // self.rows
+            row_from_bottom = slot % self.rows
+            return (self.rows - 1 - row_from_bottom, col)
+        # default: row-major from top-left
+        return (slot // self.cols, slot % self.cols)
+
+    def _key_label(self, slot):
+        # 0816:2473 physical numbering follows slot order in this column-wise mapping
+        if self.layout.get("name") == "SIDE-KEYBOARD" and self.cols == 3 and self.rows == 4 and slot < self.key_count:
+            return f"K{slot + 1}"
+        return f"K{slot + 1}"
+
     def draw(self):
         c = self.canvas
         c.delete("all")
         self.hitboxes.clear()
 
-        # Canvas dims: width ~450, height ~470
-        # 1. Draw pad shadow and chassis
-        # Outer shadow
-        round_polygon(c, 24, 24, 436, 456, radius=24, fill="#050507", outline="")
-        round_polygon(c, 20, 20, 430, 450, radius=22, fill="#121216", outline="#2c2c36", width=2)
-        
-        # Inner beveled surface plate (brushed dark metal look)
-        round_polygon(c, 26, 26, 424, 444, radius=18, fill="#18181e", outline="#25252e", width=1)
-        
-        # Subtle accent trim line at top
-        c.create_line(50, 27, 400, 27, fill="#44d62c", width=1.5)
-
-        # Brand badge plate
-        round_polygon(c, 160, 36, 290, 58, radius=8, fill="#0f0f13", outline="#282832", width=1)
-        c.create_text(225, 47, text="SD-9 PRO", fill="#626270", font=("DejaVu Sans", 8, "bold"))
-
-        # Dials at the top right / top
-        # Let's organize cleanly:
-        # Top area: Dial 1 (Left) and Dial 2 (Right)
-        # Below: 3x3 Key Matrix (Keys 1-9)
-        # Dial 1: slot 16 (press), 18 (turn left / ccw), 17 (turn right / cw)
-        # Dial 2: slot 19 (press), 21 (turn left / ccw), 20 (turn right / cw)
-        
-        self._draw_dial(dial_num=1, cx=115, cy=105, press_slot=16, left_slot=18, right_slot=17)
-        self._draw_dial(dial_num=2, cx=335, cy=105, press_slot=19, left_slot=21, right_slot=20)
-
-        # 3x3 Keys Matrix
-        # start_x = 45, start_y = 165
-        # key size = 110x78, spacing x=15, spacing y=12
+        # Layout-dependent geometry
+        cols = max(1, int(self.cols))
+        rows = max(1, int(self.rows))
         kx_start = 45
         ky_start = 165
         kw = 110
         kh = 80
         gap_x = 18
         gap_y = 12
+        grid_w = cols * kw + (cols - 1) * gap_x
+        grid_h = rows * kh + (rows - 1) * gap_y
+        pad_w = max(460, kx_start * 2 + grid_w + 20)
+        pad_h = max(480, ky_start + grid_h + 36)
+        c.config(width=pad_w, height=pad_h)
 
-        for row in range(3):
-            for col in range(3):
-                idx = row * 3 + col # slot 0..8
-                x1 = kx_start + col * (kw + gap_x)
-                y1 = ky_start + row * (kh + gap_y)
-                x2 = x1 + kw
-                y2 = y1 + kh
-                self._draw_key(idx, x1, y1, x2, y2)
+        # 1. Draw pad shadow and chassis
+        round_polygon(c, 24, 24, pad_w - 24, pad_h - 24, radius=24, fill="#050507", outline="")
+        round_polygon(c, 20, 20, pad_w - 30, pad_h - 30, radius=22, fill="#121216", outline="#2c2c36", width=2)
+        round_polygon(c, 26, 26, pad_w - 36, pad_h - 36, radius=18, fill="#18181e", outline="#25252e", width=1)
+        c.create_line(50, 27, pad_w - 60, 27, fill="#44d62c", width=1.5)
+
+        # Brand badge plate
+        badge_w = 150
+        bx1 = (pad_w - badge_w) // 2
+        bx2 = bx1 + badge_w
+        round_polygon(c, bx1, 36, bx2, 58, radius=8, fill="#0f0f13", outline="#282832", width=1)
+        label = str(self.layout.get("name", "MACRO PAD"))
+        c.create_text((bx1 + bx2) // 2, 47, text=label, fill="#626270", font=("DejaVu Sans", 8, "bold"))
+
+        # Dials at the top
+        if self.dial_count >= 1:
+            self._draw_dial(dial_num=1, cx=int(pad_w * 0.28), cy=105, press_slot=16, left_slot=18, right_slot=17)
+        if self.dial_count >= 2:
+            self._draw_dial(dial_num=2, cx=int(pad_w * 0.72), cy=105, press_slot=19, left_slot=21, right_slot=20)
+
+        # Key matrix (position per slot mapping)
+        for slot in range(self.key_count):
+            pos = self._slot_to_visual(slot)
+            if pos is None:
+                continue
+            row, col = pos
+            x1 = kx_start + col * (kw + gap_x)
+            y1 = ky_start + row * (kh + gap_y)
+            x2 = x1 + kw
+            y2 = y1 + kh
+            self._draw_key(slot, x1, y1, x2, y2)
 
     def _get_slot_desc(self, slot):
         if slot < len(self.table):
@@ -139,14 +169,30 @@ class PadCanvas(tk.Frame):
             elif t == 0x60:
                 return ("MACRO", f"Macro {a + 1}")
             elif t == 0x10:
-                if a in (1, 2, 4):
-                    btn = {1: "Left", 2: "Right", 4: "Middle"}.get(a, "Click")
-                    return ("MOUSE", f"{btn} Click")
+                if a in (1, 2, 4, 8, 16) and c == 0:
+                    btn = {1: "Left Click", 2: "Right Click", 4: "Middle Click", 8: "Back", 16: "Forward"}.get(a, "Mouse")
+                    return ("MOUSE", btn)
                 if c == 1:
                     return ("MOUSE", "Wheel Up")
                 if c == 0xFF or c == -1:
                     return ("MOUSE", "Wheel Down")
                 return ("MOUSE", "Mouse Action")
+            elif t == 0x1F:
+                labels = {0x00: "Light Sw", 0x01: "Light FX", 0x02: "KB Bri -", 0x03: "KB Bri +",
+                          0x04: "Color Sw", 0x05: "Speed +", 0x06: "Speed -",
+                          0x13: "Profile Sw", 0x14: "Light Dir", 0x19: "Kbd Lock"}
+                if a in labels:
+                    return ("KEY", labels[a])
+            elif t == 0x40 and a == 0x01:
+                return ("KEY", "Power")
+            elif t == 0x40 and a == 0x02:
+                return ("KEY", "Sleep")
+            elif t == 0x40 and a == 0x04:
+                return ("KEY", "Wakeup")
+            elif t == 0x11:
+                from sdpad import describe as sd_describe
+                d = sd_describe(e)
+                return ("MOUSE", d.replace("mousemove:", "Move "))
             elif t == 0x13:
                 return ("OFF", "Disabled")
             else:
@@ -191,9 +237,10 @@ class PadCanvas(tk.Frame):
         # Subtle top glare reflection on keycap
         c.create_line(x1 + 10, y1 + 4, x2 - 10, y1 + 4, fill="#3e3e4d", width=1)
 
-        # Key label (e.g. KEY 1, KEY 2)
+        # Key label (physical numbering varies by layout)
         key_num_color = "#44d62c" if is_sel else "#888898"
-        c.create_text(x1 + 10, y1 + 14, text=f"K{slot + 1}", fill=key_num_color, font=("DejaVu Sans", 9, "bold"), anchor="w")
+        key_label = self._key_label(slot)
+        c.create_text(x1 + 10, y1 + 14, text=key_label, fill=key_num_color, font=("DejaVu Sans", 9, "bold"), anchor="w")
 
         # Category pill badge
         cat_colors = {

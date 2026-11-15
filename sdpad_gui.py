@@ -16,9 +16,13 @@ from sdpad import (Pad, KEYS, KEYS_REV, CONSUMER, CONS_REV, MODS, parse_action,
                    describe, LIGHT_MODES)
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
-KEY_COUNT = 9            # this model (6D7F:DCFE) has 9 keys, 3x3
-COLS = 3
-DIAL_COUNT = 2           # this pad has 2 dials (slots 16-21: press, clockwise, anticlockwise each)
+
+# Device-specific physical layouts (key slots 0..N-1, row-major from top-left; dials start at 16)
+DEVICE_LAYOUTS = {
+    0xDCFE: dict(key_count=9,  cols=3, rows=3, dial_count=2, name="SD-9 PRO"),
+    0x2473: dict(key_count=12, cols=3, rows=4, dial_count=2, name="SIDE-KEYBOARD"),
+}
+DEFAULT_LAYOUT = dict(key_count=9, cols=3, rows=3, dial_count=2, name="MACRO PAD")
 
 # ---- theme (dark + neon green accent, gaming-peripheral style)
 BG       = "#0b0b0d"
@@ -44,18 +48,40 @@ KEYSYM = {"Return": "enter", "Escape": "esc", "BackSpace": "backspace", "Tab": "
           "bracketleft": "[", "bracketright": "]", "backslash": "\\", "semicolon": ";",
           "apostrophe": "'", "grave": "`", "comma": ",", "period": ".", "slash": "/",
           "Print": "printscreen", "Pause": "pause", "Menu": "menu", "Num_Lock": "numlock",
-          "Scroll_Lock": "scrolllock"}
+          "Scroll_Lock": "scrolllock",
+          # Keypad / numpad
+          "KP_0": "kp0", "KP_1": "kp1", "KP_2": "kp2", "KP_3": "kp3", "KP_4": "kp4",
+          "KP_5": "kp5", "KP_6": "kp6", "KP_7": "kp7", "KP_8": "kp8", "KP_9": "kp9",
+          "KP_Divide": "kp/", "KP_Multiply": "kp*", "KP_Subtract": "kp-", "KP_Add": "kp+",
+          "KP_Enter": "kpenter", "KP_Decimal": "kp.", "KP_Separator": "kp.",
+          "KP_Insert": "kp0", "KP_End": "kp1", "KP_Down": "kp2", "KP_Next": "kp3",
+          "KP_Left": "kp4", "KP_Begin": "kp5", "KP_Right": "kp6", "KP_Home": "kp7",
+          "KP_Up": "kp8", "KP_Prior": "kp9", "KP_Delete": "kp.", "KP_Equal": "kp="}
 
 MOD_USAGES = {0xE0: "lctrl", 0xE1: "lshift", 0xE2: "lalt", 0xE3: "lgui",
               0xE4: "rctrl", 0xE5: "rshift", 0xE6: "ralt", 0xE7: "rgui"}
 MOD_USAGES_REV = {v: k for k, v in MOD_USAGES.items()}
 
-ACTION_TYPES = ["Keystroke", "Media key", "Mouse", "Run macro", "Disabled", "Raw bytes"]
-MOUSE_CHOICES = ["left", "right", "middle", "wheelup", "wheeldown"]
+ACTION_TYPES = ["Keystroke", "Media key", "Keypad", "Mouse", "Run macro", "Keyboard control", "Disabled", "Raw bytes"]
+MOUSE_CHOICES = ["left", "right", "middle", "wheelup", "wheeldown", "back", "forward"]
 
 
-def key_slot_label(i):
+def _slot_to_visual(i, layout):
+    if not layout or i >= layout.get("key_count", 0):
+        return None
+    cols = layout.get("cols", 3)
+    rows = layout.get("rows", 3)
+    if layout.get("name") == "SIDE-KEYBOARD" and cols == 3 and rows == 4:
+        col = i // rows
+        row_from_bottom = i % rows
+        return (rows - 1 - row_from_bottom, col)
+    return (i // cols, i % cols)
+
+
+def key_slot_label(i, layout=None):
     if i < 16:
+        if layout and layout.get("name") == "SIDE-KEYBOARD" and layout.get("cols") == 3 and layout.get("rows") == 4 and i < layout.get("key_count", 0):
+            return f"Key K{i + 1} (slot {i})"
         return f"Key {i + 1}"
     d, k = divmod(i - 16, 3)
     return f"Dial {d + 1} {['press', 'turn right', 'turn left'][k]}"
@@ -78,6 +104,18 @@ def gui_describe(e):
         mode = {0: "", 1: ", repeats while held", 2: ", repeats until any key", 3: ", toggles repeat"}.get(e[3], "")
         times = f" x{e[2]}" if e[3] == 0 and e[2] > 1 else ""
         return f"Macro {e[1] + 1}{times}{mode}"
+    if e[0] == 0x1F and e[1] == 0x13:
+        return "Profile switch"
+    if e[0] == 0x1F and e[1] == 0x19:
+        return "Keyboard lock"
+    if e[0] == 0x40 and e[1] == 0x01:
+        return "Power"
+    if e[0] == 0x40 and e[1] == 0x02:
+        return "Sleep"
+    if e[0] == 0x40 and e[1] == 0x04:
+        return "Wakeup"
+    if e[0] == 0x11:
+        return describe(e)
     return describe(e)
 
 
@@ -94,6 +132,11 @@ class App(tk.Tk):
         self.table = []
         self.selected = None
         self.macros = {}
+        self.layout = dict(DEFAULT_LAYOUT)
+        self.key_count = self.layout["key_count"]
+        self.cols = self.layout["cols"]
+        self.rows = self.layout["rows"]
+        self.dial_count = self.layout["dial_count"]
         self.style = ttk.Style(self)
         self.apply_theme()
 
@@ -108,6 +151,7 @@ class App(tk.Tk):
         self.status = tk.StringVar(value="Not connected")
         ttk.Label(top, textvariable=self.status, style="Muted.TLabel").pack(side="left")
         ttk.Button(top, text="Reconnect / Refresh", command=self.connect).pack(side="right")
+        ttk.Button(top, text="Backup all profiles", command=self.backup_profiles).pack(side="right", padx=(0, 8))
         ttk.Label(top, text="   PROFILE", style="Muted.TLabel").pack(side="left")
         self.profile_var = tk.IntVar(value=1)
         self.profile_box = ttk.Combobox(top, width=3, state="readonly", textvariable=self.profile_var,
@@ -207,18 +251,44 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"{type(e).__name__}: {e}")
 
+    def apply_layout(self, layout):
+        self.layout = dict(layout)
+        self.key_count = self.layout["key_count"]
+        self.cols = self.layout["cols"]
+        self.rows = self.layout["rows"]
+        self.dial_count = self.layout["dial_count"]
+        if hasattr(self, "pad_canvas"):
+            self.pad_canvas.set_layout(self.layout)
+        self.rebuild_perkey_grid()
+        # Refresh macro trigger slot choices if macro tab is built
+        if hasattr(self, "trig_slots"):
+            slots = list(range(self.key_count)) + list(range(16, 16 + self.dial_count * 3))
+            self.trig_slots = {key_slot_label(i, self.layout): i for i in slots}
+            self.trig_ctl_box.config(values=list(self.trig_slots))
+            if self.trig_ctl.get() not in self.trig_slots:
+                self.trig_ctl.set(key_slot_label(0, self.layout))
+
     def connect(self):
         def go():
             if self.pad:
                 try:
-                    os.close(self.pad.fd)
+                    if self.pad.fd is not None:
+                        os.close(self.pad.fd)
                 except OSError:
+                    pass
+                try:
+                    if getattr(self.pad, "hid_dev", None):
+                        self.pad.hid_dev.close()
+                except Exception:
                     pass
             self.pad = Pad()
             info = self.pad.info()
             self.profile_var.set(info["active"] + 1)
+            layout = DEVICE_LAYOUTS.get(info.get("pid"), DEFAULT_LAYOUT)
+            self.apply_layout(layout)
             self.status.set(f"Connected: {self.pad.path}   PID {info['pid']:04X}   "
-                            f"firmware {info['firmware']}   profiles {info['profiles']}")
+                            f"firmware {info['firmware']}   profiles {info['profiles']}   "
+                            f"layout {self.key_count} keys ({self.cols}x{self.rows}), {self.dial_count} dials")
             self.refresh_all()
         self.guard(go)
 
@@ -230,10 +300,67 @@ class App(tk.Tk):
 
     def change_profile(self):
         def go():
-            self.pad.select_profile(self.profile_var.get() - 1)
-            time.sleep(0.3)
-            self.table = self.pad.read_table()
+            self._switch_to_profile(self.profile_var.get() - 1, update_ui=True)
+        self.guard(go)
+
+    def _switch_to_profile(self, target, update_ui=False):
+        self.pad.select_profile(target)
+        deadline = time.time() + 2.0
+        info = self.pad.info()
+        while time.time() < deadline and info.get("active") != target:
+            time.sleep(0.1)
+            info = self.pad.info()
+        time.sleep(0.15)
+        self.table = self.pad.read_table()
+        if update_ui:
+            try:
+                self.load_light()
+            except Exception:
+                pass
             self.refresh_keys()
+            self.status.set(f"Connected: {self.pad.path}   PID {info['pid']:04X}   "
+                            f"firmware {info['firmware']}   profiles {info['profiles']}   "
+                            f"layout {self.key_count} keys ({self.cols}x{self.rows}), {self.dial_count} dials"
+                            f"   profile {info.get('active', target) + 1}")
+        return info
+
+    def backup_profiles(self):
+        if not self.pad:
+            messagebox.showinfo("Backup", "Not connected.")
+            return
+
+        def go():
+            info = self.pad.info()
+            nprofiles = info.get("profiles", 1)
+            orig = info.get("active", self.profile_var.get() - 1)
+            sdpad_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sdpad.py")
+            ts = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+            out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"sdpad-backup-{ts}.txt")
+            lines = []
+            lines.append(f"# sdpad backup {ts}")
+            lines.append(f"# device: PID {info.get('pid', 0):04X} firmware {info.get('firmware')} profiles {nprofiles}")
+            lines.append("")
+            for p in range(nprofiles):
+                self._switch_to_profile(p, update_ui=False)
+                table = self.pad.read_table()
+                lines.append(f"# --- Profile {p + 1} ---")
+                lines.append(f"python3 {sdpad_path} profile {p + 1}")
+                for i, e in enumerate(table):
+                    act = sdpad.action_to_cli(tuple(e))
+                    # comment with human label
+                    try:
+                        desc = gui_describe(tuple(e))
+                    except Exception:
+                        desc = ""
+                    lines.append(f"python3 {sdpad_path} set {i} {act}  # {key_slot_label(i, self.layout)}: {desc}")
+                lines.append("")
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            # restore original
+            self._switch_to_profile(orig, update_ui=True)
+            self.profile_var.set(orig + 1)
+            self.status.set(f"Backup saved: {out_path}")
+            messagebox.showinfo("Backup", f"Saved backup for {nprofiles} profiles to:\n{out_path}")
         self.guard(go)
 
     # ================================================================== KEYS TAB
@@ -252,7 +379,7 @@ class App(tk.Tk):
         ttk.Label(info_header, text="• Click any key or dial to configure", style="Muted.TLabel").pack(side="left", padx=8)
 
         # Pad canvas instance
-        self.pad_canvas = pad_canvas.PadCanvas(left_col, on_select_slot=self.select_key)
+        self.pad_canvas = pad_canvas.PadCanvas(left_col, on_select_slot=self.select_key, layout=self.layout)
         self.pad_canvas.pack(fill="both", expand=True)
 
         # Legend pill bar at the bottom
@@ -269,8 +396,34 @@ class App(tk.Tk):
         right_col = ttk.Frame(main_box)
         right_col.pack(side="left", fill="both", expand=True)
 
-        ed = ttk.LabelFrame(right_col, text="KEY CONFIGURATION", padding=14)
-        ed.pack(fill="both", expand=True)
+        ed_outer = ttk.LabelFrame(right_col, text="KEY CONFIGURATION", padding=(8, 8))
+        ed_outer.pack(fill="both", expand=True)
+
+        ed_canvas = tk.Canvas(ed_outer, bg=BG, highlightthickness=0, bd=0)
+        ed_scroll = ttk.Scrollbar(ed_outer, orient="vertical", command=ed_canvas.yview)
+        ed_canvas.configure(yscrollcommand=ed_scroll.set)
+        ed_scroll.pack(side="right", fill="y")
+        ed_canvas.pack(side="left", fill="both", expand=True)
+
+        ed = ttk.Frame(ed_canvas)
+        ed_window = ed_canvas.create_window((0, 0), window=ed, anchor="nw")
+
+        def _ed_on_configure(event=None):
+            ed_canvas.configure(scrollregion=ed_canvas.bbox("all"))
+            ed_canvas.itemconfig(ed_window, width=ed_canvas.winfo_width())
+        ed.bind("<Configure>", _ed_on_configure)
+        ed_canvas.bind("<Configure>", _ed_on_configure)
+
+        def _ed_mousewheel(event):
+            if event.delta:
+                ed_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif event.num == 4:
+                ed_canvas.yview_scroll(-3, "units")
+            elif event.num == 5:
+                ed_canvas.yview_scroll(3, "units")
+        ed_canvas.bind_all("<MouseWheel>", _ed_mousewheel)
+        ed_canvas.bind_all("<Button-4>", _ed_mousewheel)
+        ed_canvas.bind_all("<Button-5>", _ed_mousewheel)
 
         # Top status bar of selected control
         self.ed_title = tk.StringVar(value="Select a Key or Dial to Configure")
@@ -291,7 +444,7 @@ class App(tk.Tk):
 
         # Quick preset buttons right next to it
         ttk.Label(cat_bar, text="  Quick presets:", style="Muted.TLabel").pack(side="left", padx=(10, 4))
-        for p_name, p_act in (("Mute", "media:mute"), ("Vol +", "media:volup"), ("Vol -", "media:voldown"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v")):
+        for p_name, p_act in (("Mute", "media:mute"), ("Vol +", "media:volup"), ("Vol -", "media:voldown"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Profile", "profile:switch")):
             ttk.Button(cat_bar, text=p_name, padding=(6, 4), command=lambda a=p_act: self.apply_preset(a)).pack(side="left", padx=2)
 
         ttk.Separator(ed).pack(fill="x", pady=6)
@@ -325,17 +478,55 @@ class App(tk.Tk):
         self.key_var = tk.StringVar()
         ttk.Combobox(kf, textvariable=self.key_var, values=[""] + sorted(KEYS), width=16).pack(side="left", padx=6)
 
+        sc = ttk.LabelFrame(self.p_key, text="Shortcuts / function keys", padding=10)
+        sc.pack(fill="x", pady=(10, 0))
+        ttk.Label(sc, text="Common shortcuts:").pack(anchor="w")
+        srow = ttk.Frame(sc)
+        srow.pack(anchor="w", pady=2)
+        for lbl, combo in (("Ctrl+A", "ctrl+a"), ("Ctrl+C", "ctrl+c"), ("Ctrl+V", "ctrl+v"),
+                           ("Ctrl+S", "ctrl+s"), ("Ctrl+G", "ctrl+g"), ("Ctrl+Z", "ctrl+z")):
+            ttk.Button(srow, text=lbl, padding=(6, 4), command=lambda c=combo: self.apply_shortcut_combo(c)).pack(side="left", padx=2, pady=2)
+        ttk.Label(sc, text="F13–F24:").pack(anchor="w", pady=(6, 0))
+        frow = ttk.Frame(sc)
+        frow.pack(anchor="w", pady=2)
+        for i in range(13, 25):
+            ttk.Button(frow, text=f"F{i}", padding=(4, 3), width=4, command=lambda k=f"f{i}": self.apply_shortcut_combo(k)).pack(side="left", padx=1, pady=1)
+        # Keypad keys are supported via capture (e.g. KP_6 -> kp6) and the key dropdown (kp0-kp9, kp/, kp*, ...).
+        ttk.Label(sc, text="Common keys:").pack(anchor="w", pady=(6, 0))
+        crow = ttk.Frame(sc)
+        crow.pack(anchor="w", pady=2)
+        for lbl, key in (("Caps Lock", "capslock"), ("Num Lock", "numlock"), ("Scroll Lock", "scrolllock"),
+                         ("Lock Caps", "locking_caps"), ("Lock Num", "locking_num"), ("Lock Scroll", "locking_scroll")):
+            ttk.Button(crow, text=lbl, padding=(4, 3), command=lambda k=key: self.apply_shortcut_combo(k)).pack(side="left", padx=1, pady=1)
+        crow2 = ttk.Frame(sc)
+        crow2.pack(anchor="w", pady=1)
+        for lbl, key in (("Insert", "insert"), ("Delete", "delete"), ("PrtSc", "printscreen"), ("Pause", "pause")):
+            ttk.Button(crow2, text=lbl, padding=(4, 3), command=lambda k=key: self.apply_shortcut_combo(k)).pack(side="left", padx=1, pady=1)
+        ttk.Label(sc, text="Mouse move is available under Mouse actions. 'Custom' key combinations can be set via Keystroke capture/manual.",
+                  style="Muted.TLabel", wraplength=460).pack(anchor="w", pady=(6, 0))
+
         # 2. MEDIA KEY PANEL
         self.p_media = ttk.Frame(self.panel_host)
-        ttk.Label(self.p_media, text="Select Media / Volume / Playback control:").pack(anchor="w", pady=(0, 8))
+        ttk.Label(self.p_media, text="Select media, system, or special key control:").pack(anchor="w", pady=(0, 8))
         self.media_var = tk.StringVar(value="volup")
-        
-        # Grid of popular media keys for 1-click selection
+        self.special_keystroke_media = ["execute", "help", "menu2", "select", "again", "undo",
+                                        "cut", "copy", "paste", "find", "kbmute", "volup_kb", "voldown_kb", "stop_kb"]
+
+        # Grid of popular media/system/special keys for 1-click selection
         mgrid = ttk.Frame(self.p_media)
         mgrid.pack(anchor="w", pady=(0, 8))
         m_common = [("Mute Audio", "mute"), ("Volume Up", "volup"), ("Volume Down", "voldown"),
                     ("Play / Pause", "play"), ("Next Track", "next"), ("Previous Track", "prev"),
-                    ("Stop", "stop"), ("Brightness +", "brightup"), ("Brightness -", "brightdown")]
+                    ("Stop", "stop"), ("Brightness +", "brightup"), ("Brightness -", "brightdown"),
+                    ("Multimedia", "multimedia"), ("Mail", "mail"), ("Calculator", "calculator"),
+                    ("My PC", "mypc"), ("Web Search", "web-search"), ("Web Home", "web-home"),
+                    ("Web Back", "web-backward"), ("Web Forward", "web-forward"), ("Web Stop", "web-stop"),
+                    ("Web Refresh", "web-refresh"), ("Web Favorites", "web-favorites"),
+                    ("Power", "power"), ("Sleep", "sleep"), ("Wakeup", "wakeup"),
+                    ("Cut", "cut"), ("Copy", "copy"), ("Paste", "paste"), ("Find", "find"),
+                    ("Undo", "undo"), ("Again", "again"), ("Select", "select"), ("Execute", "execute"),
+                    ("Help", "help"), ("Menu 2", "menu2"), ("Stop (key)", "stop_kb"), ("KB Mute", "kbmute"),
+                    ("KB Vol +", "volup_kb"), ("KB Vol -", "voldown_kb")]
         for m_idx, (m_lbl, m_val) in enumerate(m_common):
             b = ttk.Button(mgrid, text=m_lbl, padding=(10, 6), command=lambda v=m_val: self.media_var.set(v))
             b.grid(row=m_idx // 3, column=m_idx % 3, padx=4, pady=4, sticky="ew")
@@ -343,19 +534,99 @@ class App(tk.Tk):
         r_m = ttk.Frame(self.p_media)
         r_m.pack(anchor="w", pady=6)
         ttk.Label(r_m, text="Active Selection:").pack(side="left")
-        ttk.Combobox(r_m, state="readonly", values=sorted(CONSUMER), textvariable=self.media_var, width=16).pack(side="left", padx=6)
+        # "stop" appears in both CONSUMER (media) and as keyboard usage (0x78); include once - resolves to consumer by default in this UI
+        media_values = sorted(CONSUMER.keys()) + ["power", "sleep", "wakeup"] + self.special_keystroke_media + ["stop"]
+        ttk.Combobox(r_m, state="readonly", values=sorted(set(media_values)), textvariable=self.media_var, width=16).pack(side="left", padx=6)
 
         # 3. MOUSE PANEL
         self.p_mouse = ttk.Frame(self.panel_host)
-        ttk.Label(self.p_mouse, text="Select mouse button or scroll action:").pack(anchor="w", pady=(0, 8))
+        ttk.Label(self.p_mouse, text="Select mouse button, scroll, or cursor move action:").pack(anchor="w", pady=(0, 8))
         self.mouse_var = tk.StringVar(value="left")
         ms_frame = ttk.Frame(self.p_mouse)
         ms_frame.pack(anchor="w")
         for m_name, m_val in (("Left Click", "left"), ("Right Click", "right"), ("Middle Click", "middle"),
-                              ("Scroll Up ⇡", "wheelup"), ("Scroll Down ⇣", "wheeldown")):
-            ttk.Radiobutton(ms_frame, text=m_name, value=m_val, variable=self.mouse_var).pack(anchor="w", pady=3)
+                              ("Scroll Up ⇡", "wheelup"), ("Scroll Down ⇣", "wheeldown"),
+                              ("Back", "back"), ("Forward", "forward"),
+                              ("Mouse Move", "mousemove")):
+            ttk.Radiobutton(ms_frame, text=m_name, value=m_val, variable=self.mouse_var, command=self._show_mouse_cursor).pack(anchor="w", pady=2)
 
-        # 4. MACRO PANEL
+        self.cursor_box = ttk.LabelFrame(self.p_mouse, text="Mouse move (steps, 0-255)", padding=8)
+        self.cur_up = tk.IntVar(value=0)
+        self.cur_down = tk.IntVar(value=0)
+        self.cur_left = tk.IntVar(value=0)
+        self.cur_right = tk.IntVar(value=0)
+        self._cur_guard = False
+
+        def _cur_exclusive(changed):
+            if self._cur_guard:
+                return
+            self._cur_guard = True
+            try:
+                if changed == "up" and self.cur_up.get() > 0:
+                    self.cur_down.set(0)
+                elif changed == "down" and self.cur_down.get() > 0:
+                    self.cur_up.set(0)
+                elif changed == "left" and self.cur_left.get() > 0:
+                    self.cur_right.set(0)
+                elif changed == "right" and self.cur_right.get() > 0:
+                    self.cur_left.set(0)
+            finally:
+                self._cur_guard = False
+
+        self.cur_up.trace_add("write", lambda *_: _cur_exclusive("up"))
+        self.cur_down.trace_add("write", lambda *_: _cur_exclusive("down"))
+        self.cur_left.trace_add("write", lambda *_: _cur_exclusive("left"))
+        self.cur_right.trace_add("write", lambda *_: _cur_exclusive("right"))
+
+        grid = ttk.Frame(self.cursor_box)
+        grid.pack(anchor="w")
+        for r, (lbl, var) in enumerate((("Up", self.cur_up), ("Down", self.cur_down), ("Left", self.cur_left), ("Right", self.cur_right))):
+            ttk.Label(grid, text=lbl, width=6).grid(row=r, column=0, sticky="w", pady=2)
+            ttk.Spinbox(grid, from_=0, to=255, width=6, textvariable=var).grid(row=r, column=1, sticky="w", pady=2)
+        ttk.Label(self.cursor_box, text="Uses device mouse-move encoding (type 0x11). Set up/down and/or left/right amounts (positive values).",
+                  style="Muted.TLabel", wraplength=420).pack(anchor="w", pady=(6, 0))
+        self._show_mouse_cursor()
+
+        # 4. KEYPAD PANEL
+        self.p_keypad = ttk.Frame(self.panel_host)
+        ttk.Label(self.p_keypad, text="Select keypad / numpad key:").pack(anchor="w", pady=(0, 8))
+        self.keypad_var = tk.StringVar(value="kpenter")
+        keypad_keys = [k for k in KEYS if k.startswith("kp") or k == "numlock"]
+        # keep a stable useful order subset at top, rest sorted
+        preferred = ["numlock","kp/","kp*","kp-","kp+","kpenter","kp1","kp2","kp3","kp4","kp5","kp6","kp7","kp8","kp9","kp0","kp.","kp=","kp,","kp00","kp000"]
+        rest = [k for k in sorted(keypad_keys) if k not in preferred]
+        keypad_values = [k for k in preferred if k in keypad_keys] + rest
+        self.keypad_values = keypad_values
+        kpgrid = ttk.Frame(self.p_keypad)
+        kpgrid.pack(anchor="w", pady=(0, 8))
+        # show common ones as buttons
+        common_kp = [("NumLock","numlock"),("KP /","kp/"),("KP *","kp*"),("KP -","kp-"),("KP +","kp+"),("KP Enter","kpenter"),
+                     ("KP 7","kp7"),("KP 8","kp8"),("KP 9","kp9"),("KP 4","kp4"),("KP 5","kp5"),("KP 6","kp6"),
+                     ("KP 1","kp1"),("KP 2","kp2"),("KP 3","kp3"),("KP 0","kp0"),("KP .","kp."),("KP =","kp=")]
+        for i,(lbl,val) in enumerate(common_kp):
+            ttk.Button(kpgrid, text=lbl, padding=(6,4), command=lambda v=val: self.keypad_var.set(v)).grid(row=i//6, column=i%6, padx=2, pady=2, sticky="ew")
+        rkp = ttk.Frame(self.p_keypad)
+        rkp.pack(anchor="w", pady=4)
+        ttk.Label(rkp, text="All keypad keys:").pack(side="left")
+        ttk.Combobox(rkp, state="readonly", values=keypad_values, textvariable=self.keypad_var, width=20).pack(side="left", padx=6)
+
+        # 5. KEYBOARD CONTROL PANEL
+        self.p_kbctl = ttk.Frame(self.panel_host)
+        ttk.Label(self.p_kbctl, text="Keyboard/device control actions:").pack(anchor="w", pady=(0, 8))
+        self.kbctl_var = tk.StringVar(value="profile_switch")
+        kb_opts = [("Profile Switch", "profile_switch"), ("Keyboard Lock", "keyboard_lock"),
+                   ("Light Switch", "light_switch"), ("Light Effect", "light_effect"),
+                   ("Light Direction", "light_direction"), ("Color Switch", "color_switch"),
+                   ("Light Speed +", "light_speed_up"), ("Light Speed -", "light_speed_down"),
+                   ("KB Brightness +", "kb_brightness_up"), ("KB Brightness -", "kb_brightness_down")]
+        kbgrid = ttk.Frame(self.p_kbctl)
+        kbgrid.pack(anchor="w")
+        for i, (lbl, val) in enumerate(kb_opts):
+            ttk.Radiobutton(kbgrid, text=lbl, value=val, variable=self.kbctl_var).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=2)
+        ttk.Label(self.p_kbctl, text="Note: KB Brightness +/- (1F 03 00 00 / 1F 02 00 00) usually do not work, due to firmware error or lack of hardware.",
+                  style="Muted.TLabel", wraplength=460).pack(anchor="w", pady=(8, 0))
+
+        # 6. MACRO PANEL
         self.p_macro = ttk.Frame(self.panel_host)
         ttk.Label(self.p_macro, text="Choose which recorded macro this key will play:", font=FONT_B).pack(anchor="w")
         
@@ -384,13 +655,13 @@ class App(tk.Tk):
         ttk.Label(rep_cnt_row, text="Count (if fixed):").pack(side="left")
         ttk.Spinbox(rep_cnt_row, from_=1, to=255, width=5, textvariable=self.macro_rep).pack(side="left", padx=4)
 
-        # 5. RAW BYTES PANEL
+        # 7. RAW BYTES PANEL
         self.p_raw = ttk.Frame(self.panel_host)
         self.raw_var = tk.StringVar(value="13 00 00 00")
         ttk.Label(self.p_raw, text="Raw hex bytes [type c1 c2 c3]:").pack(side="left")
         ttk.Entry(self.p_raw, textvariable=self.raw_var, width=16).pack(side="left", padx=4)
 
-        # 6. DISABLED PANEL
+        # 8. DISABLED PANEL
         self.p_none = ttk.Frame(self.panel_host)
         ttk.Label(self.p_none, text="This key will be completely disabled (sends nothing).", style="Muted.TLabel").pack(anchor="w")
 
@@ -403,11 +674,12 @@ class App(tk.Tk):
         self.show_type_panel()
 
     def show_type_panel(self):
-        for p in (self.p_key, self.p_media, self.p_mouse, self.p_macro, self.p_raw, self.p_none):
+        for p in (self.p_key, self.p_media, self.p_keypad, self.p_mouse, self.p_macro, self.p_kbctl, self.p_raw, self.p_none):
             p.pack_forget()
         t = self.type_var.get()
-        {"Keystroke": self.p_key, "Media key": self.p_media, "Mouse": self.p_mouse,
-         "Run macro": self.p_macro, "Raw bytes": self.p_raw, "Disabled": self.p_none}[t].pack(anchor="w")
+        {"Keystroke": self.p_key, "Media key": self.p_media, "Keypad": self.p_keypad, "Mouse": self.p_mouse,
+         "Run macro": self.p_macro, "Keyboard control": self.p_kbctl,
+         "Raw bytes": self.p_raw, "Disabled": self.p_none}[t].pack(anchor="w")
 
     def on_capture(self, e):
         ks = e.keysym
@@ -436,10 +708,36 @@ class App(tk.Tk):
             parts.append(self.key_var.get())
         return "+".join(parts)
 
+    def _show_mouse_cursor(self):
+        if not hasattr(self, "cursor_box"):
+            return
+        if getattr(self, "mouse_var", None) and self.mouse_var.get() == "mousemove":
+            self.cursor_box.pack(anchor="w", fill="x", pady=(8, 0))
+        else:
+            self.cursor_box.pack_forget()
+
+    def apply_shortcut_combo(self, combo):
+        # Fill keystroke UI from a combo string like ctrl+c or f13
+        for v in self.mod_vars.values():
+            v.set(False)
+        self.key_var.set("")
+        for part in combo.lower().split("+"):
+            if part in self.mod_vars:
+                self.mod_vars[part].set(True)
+            elif part in KEYS:
+                self.key_var.set(part)
+        self.type_var.set("Keystroke")
+        self.capture.delete(0, "end")
+        self.capture.insert(0, "shortcut: " + self.current_combo_text())
+        self.show_type_panel()
+
     def refresh_keys(self):
         # Update canvas visualization
         if hasattr(self, "pad_canvas"):
-            cols = {i: "#%02x%02x%02x" % self.colour_vals[i] for i in range(min(len(self.colour_vals), KEY_COUNT))} if hasattr(self, "colour_vals") and self.colour_vals else {}
+            cols = {}
+            if hasattr(self, "colour_vals") and self.colour_vals:
+                for i in range(min(len(self.colour_vals), self.key_count)):
+                    cols[i] = "#%02x%02x%02x" % self.colour_vals[i]
             mode = getattr(self, "mode_var", None)
             rgb_mode = mode.get() if mode else "palette"
             self.pad_canvas.set_data(self.table, self.selected, key_colors=cols, rgb_mode=rgb_mode)
@@ -466,28 +764,59 @@ class App(tk.Tk):
         self.pad.write_key(self.selected, entry)
         self.table = self.pad.read_table()
         self.select_key(self.selected)
-        self.status.set(f"Saved {key_slot_label(self.selected)} -> {gui_describe(self.table[self.selected])}")
+        self.status.set(f"Saved {key_slot_label(self.selected, self.layout)} -> {gui_describe(self.table[self.selected])}")
 
     def select_key(self, i):
         self.selected = i
         e = self.table[i] if i < len(self.table) else (0x13, 0, 0, 0)
-        self.ed_title.set(f"CONFIGURING {key_slot_label(i).upper()}")
+        self.ed_title.set(f"CONFIGURING {key_slot_label(i, getattr(self, 'layout', None)).upper()}")
         self.ed_subtitle.set(f"Assigned action: {gui_describe(e)}  (Hardware memory slot {i})")
         t, a, b, c = e
-        if t == 0x20:
+        key_name = KEYS_REV.get(b, "")
+        keypad_set = set(getattr(self, "keypad_values", [])) - {"numlock"}
+        special_media = set(getattr(self, "special_keystroke_media", [])) | {"stop"}
+        if t == 0x20 and a == 0 and key_name in keypad_set:
+            self.type_var.set("Keypad")
+            self.keypad_var.set(key_name)
+        elif t == 0x20 and a == 0 and key_name in special_media and key_name != "stop":
+            self.type_var.set("Media key")
+            self.media_var.set(key_name)
+        elif t == 0x20:
             self.type_var.set("Keystroke")
             for n, bit in (("ctrl", 1), ("shift", 2), ("alt", 4), ("gui", 8)):
                 self.mod_vars[n].set(bool(a & bit))
-            self.key_var.set(KEYS_REV.get(b, ""))
+            self.key_var.set(key_name)
         elif t == 0x30:
             self.type_var.set("Media key")
             self.media_var.set(CONS_REV.get(a | b << 8, "volup"))
-        elif t == 0x10 and a in (1, 2, 4) and c == 0:
+        elif t == 0x40 and a in (0x01, 0x02, 0x04):
+            self.type_var.set("Media key")
+            self.media_var.set({0x01: "power", 0x02: "sleep", 0x04: "wakeup"}[a])
+        elif t == 0x1F and a in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x13, 0x14, 0x19):
+            self.type_var.set("Keyboard control")
+            rev = {0x00: "light_switch", 0x01: "light_effect", 0x02: "kb_brightness_down", 0x03: "kb_brightness_up",
+                   0x04: "color_switch", 0x05: "light_speed_up", 0x06: "light_speed_down",
+                   0x13: "profile_switch", 0x14: "light_direction", 0x19: "keyboard_lock"}
+            self.kbctl_var.set(rev.get(a, "profile_switch"))
+        elif t == 0x10 and a in (1, 2, 4, 8, 16) and c == 0:
             self.type_var.set("Mouse")
-            self.mouse_var.set({1: "left", 2: "right", 4: "middle"}[a])
+            self.mouse_var.set({1: "left", 2: "right", 4: "middle", 8: "back", 16: "forward"}.get(a, "left"))
         elif t == 0x10 and c in (1, 0xFF):
             self.type_var.set("Mouse")
             self.mouse_var.set("wheelup" if c == 1 else "wheeldown")
+        elif t == 0x11:
+            self.type_var.set("Mouse")
+            self.mouse_var.set("mousemove")
+            # populate mouse move fields (mutually exclusive directions)
+            self._cur_guard = True
+            try:
+                self.cur_up.set(c if (a & 0x08) else 0)
+                self.cur_down.set(0 if (a & 0x08) else c)
+                self.cur_left.set(b if (a & 0x80) else 0)
+                self.cur_right.set(0 if (a & 0x80) else b)
+            finally:
+                self._cur_guard = False
+            self._show_mouse_cursor()
         elif t == 0x60:
             self.type_var.set("Run macro")
             self.macro_idx.set(a + 1)
@@ -501,6 +830,7 @@ class App(tk.Tk):
                     self.macro_mode_str.set("times")
                 else:
                     self.macro_mode_str.set("once")
+        # 0x1F/0x40 handled above as Keyboard control / Media key; other unknowns fall through to Raw bytes below
         elif t == 0x13:
             self.type_var.set("Disabled")
         else:
@@ -518,8 +848,38 @@ class App(tk.Tk):
                 raise ValueError("Choose a key or modifier")
             return (0x20, mods, KEYS[k] if k else 0, 0)
         if t == "Media key":
-            return parse_action("media:" + self.media_var.get())
+            v = self.media_var.get()
+            if v in ("power", "sleep", "wakeup"):
+                return parse_action(v)
+            # special HID keystroke usages shown in media group
+            special = set(getattr(self, "special_keystroke_media", []))
+            if v in special and v in KEYS:
+                return (0x20, 0, KEYS[v], 0)
+            # "stop" is ambiguous (consumer 0xB7 in CONSUMER vs keyboard 0x78 in KEYS); in Media panel treat as consumer
+            return parse_action("media:" + v)
+        if t == "Keypad":
+            k = self.keypad_var.get()
+            if k not in KEYS:
+                raise ValueError("Choose a keypad key")
+            return (0x20, 0, KEYS[k], 0)
+        if t == "Keyboard control":
+            return parse_action(self.kbctl_var.get())
         if t == "Mouse":
+            if self.mouse_var.get() == "mousemove":
+                up = max(0, min(255, int(self.cur_up.get() or 0)))
+                down = max(0, min(255, int(self.cur_down.get() or 0)))
+                left = max(0, min(255, int(self.cur_left.get() or 0)))
+                right = max(0, min(255, int(self.cur_right.get() or 0)))
+                a = b = c = 0
+                if up:
+                    a |= 0x08; c = up
+                elif down:
+                    c = down
+                if left:
+                    a |= 0x80; b = left
+                elif right:
+                    b = right
+                return (0x11, a, b, c)
             return parse_action("mouse:" + self.mouse_var.get())
         if t == "Run macro":
             mode_map = {"once": 0, "hold": 1, "times": 0, "toggle": 3}
@@ -543,7 +903,7 @@ class App(tk.Tk):
             self.pad.write_key(self.selected, entry)
             self.table = self.pad.read_table()      # read back to verify
             self.select_key(self.selected)
-            self.status.set(f"Saved {key_slot_label(self.selected)} -> {gui_describe(self.table[self.selected])}")
+            self.status.set(f"Saved {key_slot_label(self.selected, self.layout)} -> {gui_describe(self.table[self.selected])}")
         self.guard(go)
 
     # ================================================================== MACROS TAB
@@ -620,10 +980,11 @@ class App(tk.Tk):
         trig = ttk.Frame(right)
         trig.pack(fill="x")
         ttk.Label(trig, text="RUN FROM", style="Muted.TLabel").pack(side="left", padx=(0, 6))
-        slots = list(range(KEY_COUNT)) + list(range(16, 16 + DIAL_COUNT * 3))
-        self.trig_slots = {key_slot_label(i): i for i in slots}
-        self.trig_ctl = tk.StringVar(value=key_slot_label(0))
-        ttk.Combobox(trig, state="readonly", values=list(self.trig_slots), textvariable=self.trig_ctl, width=18).pack(side="left")
+        slots = list(range(self.key_count)) + list(range(16, 16 + self.dial_count * 3))
+        self.trig_slots = {key_slot_label(i, self.layout): i for i in slots}
+        self.trig_ctl = tk.StringVar(value=key_slot_label(0, self.layout))
+        self.trig_ctl_box = ttk.Combobox(trig, state="readonly", values=list(self.trig_slots), textvariable=self.trig_ctl, width=18)
+        self.trig_ctl_box.pack(side="left")
         ttk.Label(trig, text="  PLAYS", style="Muted.TLabel").pack(side="left", padx=(8, 6))
         self.PLAY_MODES = {"once": (0, 1), "a number of times": (0, 2), "repeating while held": (1, 1),
                            "repeating until pressed again": (3, 1), "repeating until any key": (2, 1)}
@@ -842,7 +1203,7 @@ class App(tk.Tk):
             self.pad.write_key(slot, (0x60, self.macro_slot, count, mode))
             self.table = self.pad.read_table()
             self.refresh_keys()
-            self.status.set(f"{key_slot_label(slot)} now runs macro {self.macro_slot + 1}")
+            self.status.set(f"{key_slot_label(slot, self.layout)} now runs macro {self.macro_slot + 1}")
         self.guard(go)
 
     # ================================================================== LIGHTING TAB
@@ -875,15 +1236,39 @@ class App(tk.Tk):
 
         ttk.Separator(f).pack(fill="x", pady=12)
         ttk.Label(f, text="Per-key colours (shown when effect = perkey)").pack(anchor="w")
-        grid = ttk.Frame(f); grid.pack(anchor="w", pady=6)
-        self.colour_vals = [(0, 255, 0)] * KEY_COUNT
+        self.pk_grid_frame = ttk.Frame(f)
+        self.pk_grid_frame.pack(anchor="w", pady=6)
+        self.colour_vals = [(0, 255, 0)] * self.key_count
         self.pk_btns = []
-        for i in range(KEY_COUNT):
-            b = tk.Button(grid, text=f"Key {i + 1}", width=9, height=2, command=lambda i=i: self.pick_key_colour(i),
-                          relief="flat", bd=0, highlightthickness=1, highlightbackground=BORDER, fg="#000000", cursor="hand2")
-            b.grid(row=i // COLS, column=i % COLS, padx=3, pady=3)
-            self.pk_btns.append(b)
+        self.rebuild_perkey_grid()
         ttk.Button(f, text="Switch to per-key mode", command=self.set_perkey).pack(anchor="w")
+
+    def rebuild_perkey_grid(self):
+        if not hasattr(self, "pk_grid_frame"):
+            return
+        for child in self.pk_grid_frame.winfo_children():
+            child.destroy()
+        self.pk_btns = []
+        # preserve existing colours where possible
+        old = list(getattr(self, "colour_vals", []))
+        self.colour_vals = [old[i] if i < len(old) else (0, 255, 0) for i in range(self.key_count)]
+        for i in range(self.key_count):
+            pos = _slot_to_visual(i, self.layout)
+            if pos is None:
+                pos = (i // self.cols, i % self.cols)
+            vrow, vcol = pos
+            if self.layout.get("name") == "SIDE-KEYBOARD" and self.cols == 3 and self.rows == 4:
+                label = f"K{i+1}\nslot {i}"
+            else:
+                label = f"K{i+1}\nslot {i}"
+            b = tk.Button(self.pk_grid_frame, text=label, width=9, height=2,
+                          command=lambda i=i: self.pick_key_colour(i),
+                          relief="flat", bd=0, highlightthickness=1, highlightbackground=BORDER,
+                          fg="#000000", cursor="hand2")
+            b.grid(row=vrow, column=vcol, padx=3, pady=3)
+            hx = "#%02x%02x%02x" % self.colour_vals[i]
+            b.config(bg=hx, activebackground=hx)
+            self.pk_btns.append(b)
 
     def load_light(self):
         cur = self.pad.read_light()
@@ -892,7 +1277,13 @@ class App(tk.Tk):
         self.use_colour.set(bool(cur[6]))
         self.light_hex = hsv255_to_hex(cur[8], cur[9], cur[10])
         self.colour_btn.config(bg=self.light_hex)
-        self.colour_vals = self.pad.read_colours(KEY_COUNT)
+        try:
+            self.colour_vals = self.pad.read_colours(self.key_count)
+        except Exception:
+            self.colour_vals = [(0, 255, 0)] * self.key_count
+        # ensure button grid matches layout
+        if len(getattr(self, "pk_btns", [])) != self.key_count:
+            self.rebuild_perkey_grid()
         for b, c in zip(self.pk_btns, self.colour_vals):
             hx = "#%02x%02x%02x" % c
             b.config(bg=hx, activebackground=hx)
