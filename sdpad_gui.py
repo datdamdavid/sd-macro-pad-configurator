@@ -130,18 +130,22 @@ MOUSE_CHOICES = ["left", "right", "middle", "wheelup", "wheeldown", "back", "for
 
 
 def _slot_to_visual(i, layout):
+    """Map a protocol key slot to (visual_row, col) for the GUI layout."""
     if not layout or i >= layout.get("key_count", 0):
         return None
     cols = layout.get("cols", 3)
     rows = layout.get("rows", 3)
+    # 0816:2473 (SIDE-KEYBOARD 3x4): slots are column-wise, bottom-to-top.
     if layout.get("name") == "SIDE-KEYBOARD" and cols == 3 and rows == 4:
         col = i // rows
         row_from_bottom = i % rows
         return (rows - 1 - row_from_bottom, col)
+    # Default assumption: row-major slot order from top-left.
     return (i // cols, i % cols)
 
 
 def key_slot_label(i, layout=None):
+    """Human-readable label for a key/dial slot (includes physical K# for known layouts)."""
     if i < 16:
         if layout and layout.get("name") == "SIDE-KEYBOARD" and layout.get("cols") == 3 and layout.get("rows") == 4 and i < layout.get("key_count", 0):
             return f"Key K{i + 1} (slot {i})"

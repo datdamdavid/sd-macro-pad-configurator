@@ -78,20 +78,23 @@ class PadCanvas(tk.Frame):
         self.draw()
 
     def _slot_to_visual(self, slot):
-        """Return (visual_row, col) for a key slot, or None."""
+        """Return (visual_row, col) for a key slot, or None.
+        Maps protocol slot indices to on-screen grid positions for the active layout.
+        """
         if slot >= self.key_count:
             return None
-        # 0816:2473: protocol slots are column-wise, bottom-to-top, left-to-right
+        # 0816:2473 (SIDE-KEYBOARD 3x4): protocol slots are column-wise, bottom-to-top, left-to-right
         # left: 0,1,2,3 (bottom->top), middle: 4,5,6,7, right: 8,9,10,11
         if self.layout.get("name") == "SIDE-KEYBOARD" and self.cols == 3 and self.rows == 4:
             col = slot // self.rows
             row_from_bottom = slot % self.rows
             return (self.rows - 1 - row_from_bottom, col)
-        # default: row-major from top-left
+        # Default assumption: row-major slot order from top-left.
         return (slot // self.cols, slot % self.cols)
 
     def _key_label(self, slot):
-        # 0816:2473 physical numbering follows slot order in this column-wise mapping
+        """Physical key label for a slot (K1..)."""
+        # 0816:2473 physical numbering follows slot order in its column-wise mapping.
         if self.layout.get("name") == "SIDE-KEYBOARD" and self.cols == 3 and self.rows == 4 and slot < self.key_count:
             return f"K{slot + 1}"
         return f"K{slot + 1}"
@@ -130,13 +133,13 @@ class PadCanvas(tk.Frame):
         label = str(self.layout.get("name", "MACRO PAD"))
         c.create_text((bx1 + bx2) // 2, 47, text=label, fill="#626270", font=("DejaVu Sans", 8, "bold"))
 
-        # Dials at the top
+        # Dials at the top (protocol dial groups start at slot 16: press, cw, ccw per dial).
         if self.dial_count >= 1:
             self._draw_dial(dial_num=1, cx=int(pad_w * 0.28), cy=105, press_slot=16, left_slot=18, right_slot=17)
         if self.dial_count >= 2:
             self._draw_dial(dial_num=2, cx=int(pad_w * 0.72), cy=105, press_slot=19, left_slot=21, right_slot=20)
 
-        # Key matrix (position per slot mapping)
+        # Key matrix drawn by protocol slot index using layout-specific visual mapping.
         for slot in range(self.key_count):
             pos = self._slot_to_visual(slot)
             if pos is None:
