@@ -362,14 +362,27 @@ def parse_action(s):
             return tuple(b)
         except ValueError:
             pass
+    # Keystroke/combo: consume leading modifiers, remainder is the key name (may contain '+', e.g. kp+)
     mods, key = 0, 0
-    for part in s.split("+"):
-        if part in MODS:
-            mods |= MODS[part]
-        elif part in KEYS:
-            key = KEYS[part]
-        else:
-            sys.exit(f"Unknown key '{part}'")
+    rest = s
+    while True:
+        matched = False
+        for mod in sorted(MODS, key=len, reverse=True):
+            if rest == mod or rest.startswith(mod + "+"):
+                mods |= MODS[mod]
+                rest = rest[len(mod):]
+                if rest.startswith("+"):
+                    rest = rest[1:]
+                matched = True
+                break
+        if not matched:
+            break
+    if rest in KEYS:
+        key = KEYS[rest]
+    elif rest == "":
+        key = 0
+    else:
+        sys.exit(f"Unknown key '{rest}'")
     return (0x20, mods, key, 0)
 
 
