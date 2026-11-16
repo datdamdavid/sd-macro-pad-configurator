@@ -214,8 +214,8 @@ class Pad:
 
 
 # ---------------------------------------------------------------- key names
-MODS = {"ctrl": 1, "shift": 2, "alt": 4, "gui": 8, "win": 8, "super": 8, "cmd": 8,
-        "rctrl": 0x10, "rshift": 0x20, "ralt": 0x40, "rgui": 0x80}
+MODS = {"ctrl": 1, "control": 1, "shift": 2, "alt": 4, "option": 4, "gui": 8, "win": 8, "super": 8, "cmd": 8, "command": 8,
+        "rctrl": 0x10, "rcontrol": 0x10, "rshift": 0x20, "ralt": 0x40, "roption": 0x40, "rgui": 0x80, "rcommand": 0x80}
 KEYS = {}
 for i, c in enumerate("abcdefghijklmnopqrstuvwxyz"):
     KEYS[c] = 0x04 + i
