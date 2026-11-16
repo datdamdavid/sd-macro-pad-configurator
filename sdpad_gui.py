@@ -542,11 +542,14 @@ class App(tk.Tk):
 
         card2 = ttk.LabelFrame(self.p_key, text="Or customize modifiers and key manually", padding=10)
         card2.pack(fill="x")
-        self.mod_vars = {n: tk.BooleanVar() for n in ("ctrl", "shift", "alt", "gui")}
+        # Use tk.Checkbutton for modifier toggles to avoid ttk indicator/theme issues with custom styling.
+        self.mod_vars = {n: tk.BooleanVar(value=False) for n in ("ctrl", "shift", "alt", "gui")}
         mf = ttk.Frame(card2)
         mf.pack(anchor="w", pady=(0, 6))
         for n, v in self.mod_vars.items():
-            ttk.Checkbutton(mf, text=n.capitalize() if n != "gui" else "Win/Super", variable=v).pack(side="left", padx=6)
+            tk.Checkbutton(mf, text=n.capitalize() if n != "gui" else "Win/Super", variable=v,
+                           bg=BG, fg=FG, activebackground=BG, activeforeground=ACCENT,
+                           selectcolor=PANEL2, highlightthickness=0, bd=0, font=FONT).pack(side="left", padx=6)
         kf = ttk.Frame(card2)
         kf.pack(anchor="w", pady=4)
         ttk.Label(kf, text="Target Key:").pack(side="left")
